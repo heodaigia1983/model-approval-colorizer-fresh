@@ -1,14 +1,74 @@
 let API = null;
 let excelRows = [];
+let workbookData = null;
+let firstSheetName = "";
 
-const colorMap = {
-  "SYSTEM 2": "#4CAF50",
-  "SYSTEM 5": "#F44336",
-  "": "#BDBDBD"
-};
+const APPROVED_COLOR = "#4CAF50";
+const DEFAULT_BASE_COLOR = "#B8860B";
+
+const WEIGHT_KEYS = [
+  "WEIGHT",
+  "Weight",
+  "weight",
+  "MASS",
+  "Mass",
+  "mass",
+  "PROFILE_WEIGHT",
+  "ASSEMBLY_WEIGHT",
+  "TOTAL_WEIGHT",
+  "PART_WEIGHT",
+  "MODEL_WEIGHT"
+];
 
 function log(msg) {
-  document.getElementById("log").textContent += msg + "\n";
+  const el = document.getElementById("log");
+  if (el) el.textContent += msg + "\n";
+  console.log(msg);
+}
+
+function clearLog() {
+  const el = document.getElementById("log");
+  if (el) el.textContent = "";
+}
+
+function updateStats({
+  totalObjects = "-",
+  totalWeight = "-",
+  greenObjectCount = "-",
+  greenWeight = "-"
+} = {}) {
+  const el = document.getElementById("stats");
+  if (!el) return;
+
+  el.innerHTML =
+    `Tổng số cấu kiện dự án: <strong>${totalObjects}</strong><br />` +
+    `Tổng khối lượng dự án: <strong>${totalWeight}</strong><br />` +
+    `Số cấu kiện đang triển khai: <strong>${greenObjectCount}</strong><br />` +
+    `Khối lượng đang triển khai: <strong>${greenWeight}</strong>`;
+}
+
+function isValidHexColor(value) {
+  return /^#[0-9A-Fa-f]{6}$/.test(String(value || "").trim());
+}
+
+function getBaseColor() {
+  const text = document.getElementById("baseColorText");
+  const picker = document.getElementById("baseColorPicker");
+
+  const fromText = String(text?.value || "").trim();
+  if (isValidHexColor(fromText)) return fromText;
+
+  const fromPicker = String(picker?.value || "").trim();
+  if (isValidHexColor(fromPicker)) return fromPicker;
+
+  return DEFAULT_BASE_COLOR;
+}
+
+function syncColorInputs(color) {
+  const picker = document.getElementById("baseColorPicker");
+  const text = document.getElementById("baseColorText");
+  if (picker) picker.value = color;
+  if (text) text.value = color;
 }
 
 async function initAPI() {
@@ -18,20 +78,18 @@ async function initAPI() {
     console.log("Trimble event:", event, data);
   });
 
-  log("Đã kết nối Trimble API.");
+  log("Connected to Trimble Workspace API.");
   return API;
 }
 
-function readExcel(file) {
+function readWorkbook(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
 
-    reader.onload = e => {
+    reader.onload = (e) => {
       try {
         const workbook = XLSX.read(e.target.result, { type: "array" });
-        const sheet = workbook.Sheets[workbook.SheetNames[0]];
-        const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
-        resolve(rows);
+        resolve(workbook);
       } catch (err) {
         reject(err);
       }
@@ -42,116 +100,117 @@ function readExcel(file) {
   });
 }
 
-function normalizeRows(rows) {
+function getFirstSheetName(workbook) {
+  if (!workbook || !Array.isArray(workbook.SheetNames) || workbook.SheetNames.length === 0) {
+    return "";
+  }
+  return String(workbook.SheetNames[0] || "").trim();
+}
+
+function buildSuggestedViewName(sheetName) {
+  const now = new Date();
+  const dateText =
+    now.getFullYear() +
+    "-" +
+    String(now.getMonth() + 1).padStart(2, "0") +
+    "-" +
+    String(now.getDate()).padStart(2, "0") +
+    " " +
+    String(now.getHours()).padStart(2, "0") +
+    ":" +
+    String(now.getMinutes()).padStart(2, "0");
+
+  return `${sheetName || "Approval"} - ${dateText}`;
+}
+
+function fillSuggestedViewName(force = false) {
+  const input = document.getElementById("viewNameInput");
+  if (!input) return;
+
+  if (force || !input.value.trim() || input.dataset.userEdited !== "1") {
+    input.value = buildSuggestedViewName(firstSheetName);
+    input.dataset.userEdited = "0";
+  }
+}
+
+function sheetToRows(workbook, sheetName) {
+  if (!workbook) throw new Error("Workbook chưa được nạp.");
+  if (!sheetName) throw new Error("Không tìm thấy sheet đầu tiên.");
+
+  const sheet = workbook.Sheets[sheetName];
+  if (!sheet) throw new Error(`Không tìm thấy sheet: ${sheetName}`);
+
+  return XLSX.utils.sheet_to_json(sheet, { defval: "" });
+}
+
+function normalizeExcelGuids(rows) {
+  const seen = new Set();
+
   return rows
-    .map(r => ({
-      guid: String(r.GUID || "").trim(),
-      paintCode: String(r["PAINT CODE"] || "").trim()
-    }))
-    .filter(r => r.guid);
+    .map(r => String(r.GUID || "").trim())
+    .filter(Boolean)
+    .filter(guid => {
+      if (seen.has(guid)) return false;
+      seen.add(guid);
+      return true;
+    });
 }
 
-async function getLoadedModelId() {
-  const api = await initAPI();
-
-  // thử lấy từ viewer objects trước
-  try {
-    const viewerObjects = await api.viewer.getObjects();
-    if (Array.isArray(viewerObjects) && viewerObjects.length) {
-      const modelIds = [...new Set(viewerObjects.map(x => x.modelId).filter(Boolean))];
-      if (modelIds.length) {
-        log("Loaded modelIds trong viewer: " + modelIds.join(", "));
-        return modelIds[0];
-      }
-    }
-
-    if (
-      viewerObjects &&
-      Array.isArray(viewerObjects.modelObjectIds) &&
-      viewerObjects.modelObjectIds.length
-    ) {
-      const modelIds = [...new Set(viewerObjects.modelObjectIds.map(x => x.modelId).filter(Boolean))];
-      if (modelIds.length) {
-        log("Loaded modelIds trong viewer: " + modelIds.join(", "));
-        return modelIds[0];
-      }
-    }
-  } catch (err) {
-    log("getObjects fallback: " + (err?.message || String(err)));
+function chunkArray(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) {
+    out.push(arr.slice(i, i + size));
   }
-
-  // fallback sang getModels
-  const models = await api.viewer.getModels();
-
-  if (!models || !models.length) {
-    throw new Error("Không tìm thấy model đang load.");
-  }
-
-  log("viewer.getModels(): " + models.map(m => m.id).join(", "));
-  return models[0].id;
+  return out;
 }
 
-async function colorByPaintCode() {
-  const api = await initAPI();
+function extractRuntimeIdsFromGroup(group) {
+  const ids = new Set();
 
-  if (!excelRows.length) {
-    log("Chưa có dữ liệu Excel.");
-    return;
-  }
+  if (!group) return [];
 
-  const modelId = await getLoadedModelId();
-  const rows = normalizeRows(excelRows);
-
-  log("ModelId: " + modelId);
-  log("Bắt đầu đổi GUID -> runtimeId...");
-
-  const guids = rows.map(r => r.guid);
-
-  // test 1 GUID trước
-  log("Test GUID đầu tiên: " + guids[0]);
-
-  let testRuntimeIds;
-  try {
-    testRuntimeIds = await api.viewer.convertToObjectRuntimeIds(modelId, [guids[0]]);
-    log("Test runtimeIds[0]: " + JSON.stringify(testRuntimeIds));
-  } catch (err) {
-    log("Lỗi test convert 1 GUID: " + (err?.message || JSON.stringify(err) || String(err)));
-    throw err;
-  }
-
-  let runtimeIds;
-  try {
-    runtimeIds = await api.viewer.convertToObjectRuntimeIds(modelId, guids);
-  } catch (err) {
-    log("Lỗi convert full list: " + (err?.message || JSON.stringify(err) || String(err)));
-    throw err;
-  }
-
-  const groups = {};
-  let matched = 0;
-  let unmatched = 0;
-
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
-    const runtimeId = runtimeIds[i];
-
-    if (runtimeId === undefined || runtimeId === null) {
-      unmatched++;
-      continue;
+  if (Array.isArray(group.objects)) {
+    for (const obj of group.objects) {
+      if (typeof obj?.id === "number") ids.add(obj.id);
     }
-
-    const color = colorMap[row.paintCode] || "#2196F3";
-
-    if (!groups[color]) groups[color] = [];
-    groups[color].push(runtimeId);
-    matched++;
   }
 
-  log("Match: " + matched);
-  log("Không match: " + unmatched);
+  return Array.from(ids);
+}
 
-  for (const color in groups) {
-    const ids = groups[color];
+async function getLoadedModelGroups() {
+  const api = await initAPI();
+  const raw = await api.viewer.getObjects();
+
+  if (!Array.isArray(raw) || !raw.length) {
+    throw new Error("Viewer returned no objects.");
+  }
+
+  const groups = raw
+    .map(group => {
+      const modelId = group?.modelId;
+      const runtimeIds = extractRuntimeIdsFromGroup(group);
+      return { modelId, runtimeIds };
+    })
+    .filter(group => group.modelId && group.runtimeIds.length > 0);
+
+  if (!groups.length) {
+    throw new Error("Could not read runtime IDs from viewer.getObjects().");
+  }
+
+  log("Loaded model IDs: " + groups.map(g => g.modelId).join(", "));
+  return groups;
+}
+
+function countAllObjects(modelGroups) {
+  return modelGroups.reduce((sum, g) => sum + g.runtimeIds.length, 0);
+}
+
+async function setObjectColorBatch(api, modelId, runtimeIds, color, label) {
+  const batches = chunkArray(runtimeIds, 1000);
+
+  for (let i = 0; i < batches.length; i++) {
+    const ids = batches[i];
     if (!ids.length) continue;
 
     await api.viewer.setObjectState(
@@ -168,34 +227,366 @@ async function colorByPaintCode() {
       }
     );
 
-    log(`Đã tô ${ids.length} object -> ${color}`);
+    log(`${label}: batch ${i + 1}/${batches.length} (${ids.length} objects)`);
+  }
+}
+
+async function applyBaseColor(api, modelGroups, color) {
+  for (const group of modelGroups) {
+    await setObjectColorBatch(
+      api,
+      group.modelId,
+      group.runtimeIds,
+      color,
+      `Base color on model ${group.modelId}`
+    );
+  }
+}
+
+function normalizeConvertedIds(value) {
+  if (value === null || value === undefined) return [];
+
+  if (typeof value === "number") return [value];
+
+  if (Array.isArray(value)) {
+    return value.flat(Infinity).filter(v => typeof v === "number");
   }
 
-  log("Hoàn tất tô màu.");
+  return [];
 }
+
+async function convertGuidsAcrossModels(api, modelGroups, guids) {
+  const matches = new Array(guids.length).fill(null);
+
+  for (const group of modelGroups) {
+    log(`Converting GUIDs on model ${group.modelId}...`);
+
+    let runtimeIds;
+    try {
+      runtimeIds = await api.viewer.convertToObjectRuntimeIds(group.modelId, guids);
+    } catch (err) {
+      log(`Convert error on model ${group.modelId}: ${err?.message || String(err)}`);
+      continue;
+    }
+
+    if (!Array.isArray(runtimeIds)) continue;
+
+    for (let i = 0; i < guids.length; i++) {
+      if (matches[i]) continue;
+
+      const ids = normalizeConvertedIds(runtimeIds[i]);
+      if (ids.length > 0) {
+        matches[i] = {
+          modelId: group.modelId,
+          runtimeIds: ids,
+          guid: guids[i]
+        };
+      }
+    }
+  }
+
+  return matches;
+}
+
+function buildApprovedSetsByModel(matches) {
+  const map = new Map();
+
+  for (const item of matches) {
+    if (!item) continue;
+
+    if (!map.has(item.modelId)) {
+      map.set(item.modelId, new Set());
+    }
+
+    const set = map.get(item.modelId);
+    item.runtimeIds.forEach(id => set.add(id));
+  }
+
+  return map;
+}
+
+function parseWeightValue(value) {
+  if (typeof value === "number") return value;
+
+  if (typeof value !== "string") return null;
+
+  let s = value.trim();
+  if (!s) return null;
+
+  s = s.replace(/,/g, "");
+  const match = s.match(/-?\d+(\.\d+)?/);
+  if (!match) return null;
+
+  const n = Number(match[0]);
+  return Number.isFinite(n) ? n : null;
+}
+
+function extractWeightFromObjectProperties(objectProps) {
+  const sets = objectProps?.properties || [];
+  for (const set of sets) {
+    const props = set?.properties || [];
+    for (const prop of props) {
+      const name = String(prop?.name || "").trim();
+      if (!WEIGHT_KEYS.includes(name)) continue;
+
+      const weight = parseWeightValue(prop?.value);
+      if (weight !== null) return weight;
+    }
+  }
+  return null;
+}
+
+async function sumWeightForIds(api, modelId, runtimeIds, label) {
+  let total = 0;
+
+  const batches = chunkArray(runtimeIds, 300);
+
+  for (let i = 0; i < batches.length; i++) {
+    const ids = batches[i];
+    if (!ids.length) continue;
+
+    let objectProps = [];
+    try {
+      objectProps = await api.viewer.getObjectProperties(modelId, ids);
+    } catch (err) {
+      log(`${label} property batch ${i + 1}/${batches.length} failed: ${err?.message || String(err)}`);
+      continue;
+    }
+
+    for (const obj of objectProps || []) {
+      const w = extractWeightFromObjectProperties(obj);
+      if (w !== null) total += w;
+    }
+
+    log(`${label} weight batch ${i + 1}/${batches.length} done.`);
+  }
+
+  return total;
+}
+
+async function calculateWeights(api, modelGroups, approvedSetsByModel) {
+  let totalModelWeight = 0;
+  let greenWeight = 0;
+
+  for (const group of modelGroups) {
+    const allIds = group.runtimeIds;
+    const greenIds = Array.from(approvedSetsByModel.get(group.modelId) || new Set());
+
+    totalModelWeight += await sumWeightForIds(api, group.modelId, allIds, `Total model ${group.modelId}`);
+
+    if (greenIds.length) {
+      greenWeight += await sumWeightForIds(api, group.modelId, greenIds, `Green model ${group.modelId}`);
+    }
+  }
+
+  return {
+    totalModelWeight,
+    greenWeight
+  };
+}
+
+function formatWeight(n) {
+  if (!Number.isFinite(n)) return "-";
+  return n.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+}
+
+async function applyColorWorkflow() {
+  const api = await initAPI();
+
+  if (!excelRows.length) {
+    log("No Excel data loaded.");
+    return;
+  }
+
+  const baseColor = getBaseColor();
+  syncColorInputs(baseColor);
+
+  const excelGuids = normalizeExcelGuids(excelRows);
+  const modelGroups = await getLoadedModelGroups();
+  const totalObjects = countAllObjects(modelGroups);
+
+  log("Using first sheet: " + firstSheetName);
+  log("Base color: " + baseColor);
+  log("Total viewer objects: " + totalObjects);
+  log("Unique Excel GUIDs: " + excelGuids.length);
+
+  if (!excelGuids.length) {
+    throw new Error("Excel does not contain valid GUIDs.");
+  }
+
+  log("Applying base color to full model...");
+  await applyBaseColor(api, modelGroups, baseColor);
+
+  const matches = await convertGuidsAcrossModels(api, modelGroups, excelGuids);
+  const approvedSetsByModel = buildApprovedSetsByModel(matches);
+
+  let greenObjectCount = 0;
+  for (const [, ids] of approvedSetsByModel.entries()) {
+    greenObjectCount += ids.size;
+  }
+
+  log("Approved objects (green): " + greenObjectCount);
+
+  for (const [modelId, idSet] of approvedSetsByModel.entries()) {
+    const ids = Array.from(idSet);
+    await setObjectColorBatch(api, modelId, ids, APPROVED_COLOR, `Green color on model ${modelId}`);
+  }
+
+  log("Calculating weights...");
+  const weightSummary = await calculateWeights(api, modelGroups, approvedSetsByModel);
+
+  updateStats({
+    totalObjects,
+    totalWeight: formatWeight(weightSummary.totalModelWeight),
+    greenObjectCount,
+    greenWeight: formatWeight(weightSummary.greenWeight)
+  });
+
+  log("Done.");
+  log("Result: Full model got base color, Excel objects got green color.");
+}
+
+async function resetViewer() {
+  const api = await initAPI();
+  clearLog();
+  log("Resetting viewer...");
+
+  try {
+    await api.viewer.setObjectState(undefined, { color: "reset", visible: "reset" });
+  } catch (err) {
+    log("Color reset fallback: " + (err?.message || String(err)));
+  }
+
+  await api.viewer.reset();
+  updateStats();
+  log("Viewer reset completed.");
+}
+
+async function saveCurrentView() {
+  const api = await initAPI();
+
+  let viewName = String(document.getElementById("viewNameInput")?.value || "").trim();
+  if (!viewName) {
+    viewName = buildSuggestedViewName(firstSheetName);
+    const input = document.getElementById("viewNameInput");
+    if (input) input.value = viewName;
+  }
+
+  const description = `Saved from Model Approval Colorizer | Sheet: ${firstSheetName || "-"} | Developed by Le Van Thao`;
+
+  const createdView = await api.view.createView({
+    name: viewName,
+    description: description
+  });
+
+  if (!createdView?.id) {
+    throw new Error("Create view succeeded but no view ID was returned.");
+  }
+
+  await api.view.updateView({ id: createdView.id });
+  await api.view.selectView(createdView.id);
+
+  log(`View saved and opened: ${createdView.name || viewName}`);
+}
+
+document.getElementById("fileInput").addEventListener("change", async (event) => {
+  try {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    workbookData = await readWorkbook(file);
+    firstSheetName = getFirstSheetName(workbookData);
+
+    if (!firstSheetName) {
+      throw new Error("File Excel không có sheet.");
+    }
+
+    fillSuggestedViewName(true);
+
+    log("Workbook loaded.");
+    log("Using first sheet: " + firstSheetName);
+  } catch (err) {
+    console.error(err);
+    log("Workbook load error: " + (err?.message || JSON.stringify(err) || String(err)));
+  }
+});
+
+document.getElementById("viewNameInput").addEventListener("input", (e) => {
+  e.target.dataset.userEdited = e.target.value.trim() ? "1" : "0";
+});
+
+document.getElementById("baseColorPicker").addEventListener("input", (e) => {
+  const color = e.target.value;
+  if (isValidHexColor(color)) {
+    syncColorInputs(color);
+  }
+});
+
+document.getElementById("baseColorText").addEventListener("change", (e) => {
+  const color = String(e.target.value || "").trim();
+  if (isValidHexColor(color)) {
+    syncColorInputs(color);
+  } else {
+    syncColorInputs(DEFAULT_BASE_COLOR);
+  }
+});
 
 document.getElementById("readBtn").addEventListener("click", async () => {
   try {
     const file = document.getElementById("fileInput").files[0];
+
     if (!file) {
-      log("Chưa chọn file Excel.");
+      log("Please choose an Excel file.");
       return;
     }
 
-    document.getElementById("log").textContent = "";
+    if (!workbookData) {
+      workbookData = await readWorkbook(file);
+      firstSheetName = getFirstSheetName(workbookData);
+      fillSuggestedViewName(true);
+    }
+
+    if (!firstSheetName) {
+      log("Could not find the first sheet.");
+      return;
+    }
+
+    clearLog();
+    updateStats();
     await initAPI();
 
-    excelRows = await readExcel(file);
-    log(`Đọc xong ${excelRows.length} dòng.`);
-    log("5 dòng đầu:");
+    excelRows = sheetToRows(workbookData, firstSheetName);
 
-    excelRows.slice(0, 5).forEach(r => {
-      log(`${r.GUID} | ${r["PAINT CODE"]}`);
-    });
+    log(`Using first sheet: ${firstSheetName}`);
+    log(`Excel rows loaded: ${excelRows.length}`);
 
-    await colorByPaintCode();
+    await applyColorWorkflow();
   } catch (err) {
     console.error(err);
-    log("Lỗi: " + (err?.message || JSON.stringify(err) || String(err)));
+    log("Error: " + (err?.message || JSON.stringify(err) || String(err)));
   }
 });
+
+document.getElementById("resetBtn").addEventListener("click", async () => {
+  try {
+    await resetViewer();
+  } catch (err) {
+    console.error(err);
+    log("Reset error: " + (err?.message || JSON.stringify(err) || String(err)));
+  }
+});
+
+document.getElementById("saveViewBtn").addEventListener("click", async () => {
+  try {
+    await saveCurrentView();
+  } catch (err) {
+    console.error(err);
+    log("Save View error: " + (err?.message || JSON.stringify(err) || String(err)));
+  }
+});
+
+updateStats();
+syncColorInputs(DEFAULT_BASE_COLOR);
