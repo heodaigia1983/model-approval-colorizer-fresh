@@ -244,18 +244,6 @@ async function setObjectColorBatch(api, modelId, runtimeIds, color, label) {
   }
 }
 
-async function applyBaseColor(api, modelGroups, color) {
-  for (const group of modelGroups) {
-    await setObjectColorBatch(
-      api,
-      group.modelId,
-      group.runtimeIds,
-      color,
-      `Base color on model ${group.modelId}`
-    );
-  }
-}
-
 function getRuntimeIdFromPropertyObject(obj, fallbackId) {
   if (typeof obj?.id === "number") return obj.id;
   if (typeof obj?.objectRuntimeId === "number") return obj.objectRuntimeId;
@@ -324,7 +312,7 @@ function extractWeightFromObjectProperties(objectProps) {
   return null;
 }
 
-async function findApprovedVisibleIds(api, modelGroups, excelGuidSet) {
+async function scanVisibleObjects(api, modelGroups, excelGuidSet) {
   const approvedSetsByModel = new Map();
   const matchedGuids = new Set();
 
@@ -424,6 +412,14 @@ function formatWeight(n) {
   });
 }
 
+function buildBaseIds(allIds, approvedIdSet) {
+  const out = [];
+  for (const id of allIds) {
+    if (!approvedIdSet.has(id)) out.push(id);
+  }
+  return out;
+}
+
 async function applyColorWorkflow() {
   const api = await initAPI();
 
@@ -450,11 +446,8 @@ async function applyColorWorkflow() {
     throw new Error("Excel does not contain valid GUIDs.");
   }
 
-  log("Applying base color to full model...");
-  await applyBaseColor(api, modelGroups, baseColor);
-
   log("Scanning visible objects by GUID...");
-  const scanResult = await findApprovedVisibleIds(api, modelGroups, excelGuidSet);
+  const scanResult = await scanVisibleObjects(api, modelGroups, excelGuidSet);
   const approvedSetsByModel = scanResult.approvedSetsByModel;
   const matchedGuidCount = scanResult.matchedGuidCount;
 
@@ -466,10 +459,28 @@ async function applyColorWorkflow() {
   log("Matched GUIDs on visible objects: " + matchedGuidCount);
   log("Approved visible objects (green): " + greenObjectCount);
 
+  log("Applying base color only to non-approved objects...");
+  for (const group of modelGroups) {
+    const approvedIdSet = approvedSetsByModel.get(group.modelId) || new Set();
+    const baseIds = buildBaseIds(group.runtimeIds, approvedIdSet);
+
+    await setObjectColorBatch(
+      api,
+      group.modelId,
+      baseIds,
+      baseColor,
+      `Base color on model ${group.modelId}`
+    );
+  }
+
+  log("Applying green color to approved objects...");
   for (const [modelId, idSet] of approvedSetsByModel.entries()) {
     const ids = Array.from(idSet);
     await setObjectColorBatch(api, modelId, ids, APPROVED_COLOR, `Green color on model ${modelId}`);
   }
+
+  const colored = await api.viewer.getColoredObjects();
+  log("Colored object groups in viewer: " + (Array.isArray(colored) ? colored.length : 0));
 
   log("Calculating weights...");
   const weightSummary = await calculateWeights(api, modelGroups, approvedSetsByModel);
@@ -482,7 +493,7 @@ async function applyColorWorkflow() {
   });
 
   log("Done.");
-  log("Result: Full model got base color, visible objects whose GUID is in Excel got green color.");
+  log("Result: Non-approved objects got base color, approved objects got green color.");
 }
 
 async function resetViewer() {
