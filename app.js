@@ -20,6 +20,19 @@ const WEIGHT_KEYS = [
   "MODEL_WEIGHT"
 ];
 
+const GUID_KEYS = [
+  "GUID",
+  "Guid",
+  "guid",
+  "GLOBALID",
+  "GlobalId",
+  "globalId",
+  "IFC GUID",
+  "IfcGUID",
+  "IFC_GUID",
+  "ifcguid"
+];
+
 function log(msg) {
   const el = document.getElementById("log");
   if (el) el.textContent += msg + "\n";
@@ -243,66 +256,41 @@ async function applyBaseColor(api, modelGroups, color) {
   }
 }
 
-function normalizeConvertedIds(value) {
-  if (value === null || value === undefined) return [];
-
-  if (typeof value === "number") return [value];
-
-  if (Array.isArray(value)) {
-    return value.flat(Infinity).filter(v => typeof v === "number");
-  }
-
-  return [];
+function getRuntimeIdFromPropertyObject(obj, fallbackId) {
+  if (typeof obj?.id === "number") return obj.id;
+  if (typeof obj?.objectRuntimeId === "number") return obj.objectRuntimeId;
+  if (typeof obj?.runtimeId === "number") return obj.runtimeId;
+  if (typeof fallbackId === "number") return fallbackId;
+  return null;
 }
 
-async function convertGuidsAcrossModels(api, modelGroups, guids) {
-  const matches = new Array(guids.length).fill(null);
+function extractGuidFromObjectProperties(objectProps) {
+  const directCandidates = [
+    objectProps?.guid,
+    objectProps?.GUID,
+    objectProps?.globalId,
+    objectProps?.GlobalId,
+    objectProps?.externalId
+  ];
 
-  for (const group of modelGroups) {
-    log(`Converting GUIDs on model ${group.modelId}...`);
+  for (const value of directCandidates) {
+    const s = String(value || "").trim();
+    if (s) return s;
+  }
 
-    let runtimeIds;
-    try {
-      runtimeIds = await api.viewer.convertToObjectRuntimeIds(group.modelId, guids);
-    } catch (err) {
-      log(`Convert error on model ${group.modelId}: ${err?.message || String(err)}`);
-      continue;
-    }
+  const sets = objectProps?.properties || [];
+  for (const set of sets) {
+    const props = set?.properties || [];
+    for (const prop of props) {
+      const name = String(prop?.name || "").trim();
+      if (!GUID_KEYS.includes(name)) continue;
 
-    if (!Array.isArray(runtimeIds)) continue;
-
-    for (let i = 0; i < guids.length; i++) {
-      if (matches[i]) continue;
-
-      const ids = normalizeConvertedIds(runtimeIds[i]);
-      if (ids.length > 0) {
-        matches[i] = {
-          modelId: group.modelId,
-          runtimeIds: ids,
-          guid: guids[i]
-        };
-      }
+      const guid = String(prop?.value || "").trim();
+      if (guid) return guid;
     }
   }
 
-  return matches;
-}
-
-function buildApprovedSetsByModel(matches) {
-  const map = new Map();
-
-  for (const item of matches) {
-    if (!item) continue;
-
-    if (!map.has(item.modelId)) {
-      map.set(item.modelId, new Set());
-    }
-
-    const set = map.get(item.modelId);
-    item.runtimeIds.forEach(id => set.add(id));
-  }
-
-  return map;
+  return "";
 }
 
 function parseWeightValue(value) {
@@ -334,6 +322,49 @@ function extractWeightFromObjectProperties(objectProps) {
     }
   }
   return null;
+}
+
+async function findApprovedVisibleIds(api, modelGroups, excelGuidSet) {
+  const approvedSetsByModel = new Map();
+  const matchedGuids = new Set();
+
+  for (const group of modelGroups) {
+    const visibleIds = group.runtimeIds;
+    const batches = chunkArray(visibleIds, 250);
+    const approvedIds = new Set();
+
+    for (let i = 0; i < batches.length; i++) {
+      const batchIds = batches[i];
+      let propsList = [];
+
+      try {
+        propsList = await api.viewer.getObjectProperties(group.modelId, batchIds);
+      } catch (err) {
+        log(`GUID scan failed on model ${group.modelId}, batch ${i + 1}/${batches.length}: ${err?.message || String(err)}`);
+        continue;
+      }
+
+      for (let j = 0; j < (propsList || []).length; j++) {
+        const obj = propsList[j];
+        const runtimeId = getRuntimeIdFromPropertyObject(obj, batchIds[j]);
+        const guid = extractGuidFromObjectProperties(obj);
+
+        if (runtimeId !== null && guid && excelGuidSet.has(guid)) {
+          approvedIds.add(runtimeId);
+          matchedGuids.add(guid);
+        }
+      }
+
+      log(`GUID scan on model ${group.modelId}: batch ${i + 1}/${batches.length}`);
+    }
+
+    approvedSetsByModel.set(group.modelId, approvedIds);
+  }
+
+  return {
+    approvedSetsByModel,
+    matchedGuidCount: matchedGuids.size
+  };
 }
 
 async function sumWeightForIds(api, modelId, runtimeIds, label) {
@@ -405,6 +436,8 @@ async function applyColorWorkflow() {
   syncColorInputs(baseColor);
 
   const excelGuids = normalizeExcelGuids(excelRows);
+  const excelGuidSet = new Set(excelGuids);
+
   const modelGroups = await getLoadedModelGroups();
   const totalObjects = countAllObjects(modelGroups);
 
@@ -420,15 +453,18 @@ async function applyColorWorkflow() {
   log("Applying base color to full model...");
   await applyBaseColor(api, modelGroups, baseColor);
 
-  const matches = await convertGuidsAcrossModels(api, modelGroups, excelGuids);
-  const approvedSetsByModel = buildApprovedSetsByModel(matches);
+  log("Scanning visible objects by GUID...");
+  const scanResult = await findApprovedVisibleIds(api, modelGroups, excelGuidSet);
+  const approvedSetsByModel = scanResult.approvedSetsByModel;
+  const matchedGuidCount = scanResult.matchedGuidCount;
 
   let greenObjectCount = 0;
   for (const [, ids] of approvedSetsByModel.entries()) {
     greenObjectCount += ids.size;
   }
 
-  log("Approved objects (green): " + greenObjectCount);
+  log("Matched GUIDs on visible objects: " + matchedGuidCount);
+  log("Approved visible objects (green): " + greenObjectCount);
 
   for (const [modelId, idSet] of approvedSetsByModel.entries()) {
     const ids = Array.from(idSet);
@@ -446,7 +482,7 @@ async function applyColorWorkflow() {
   });
 
   log("Done.");
-  log("Result: Full model got base color, Excel objects got green color.");
+  log("Result: Full model got base color, visible objects whose GUID is in Excel got green color.");
 }
 
 async function resetViewer() {
