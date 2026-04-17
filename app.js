@@ -55,6 +55,25 @@ function normalizeRows(rows) {
     .filter(r => r.guid);
 }
 
+function normalizeRuntimeIds(value) {
+  if (value === undefined || value === null) return [];
+  if (typeof value === "number") return [value];
+  if (Array.isArray(value)) return value.flat(Infinity).filter(v => typeof v === "number");
+  return [];
+}
+
+function uniqueIds(ids) {
+  return [...new Set(ids)];
+}
+
+function chunkArray(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) {
+    out.push(arr.slice(i, i + size));
+  }
+  return out;
+}
+
 async function getLoadedModelId() {
   const api = await initAPI();
 
@@ -94,6 +113,48 @@ async function getLoadedModelId() {
   return models[0].id;
 }
 
+async function resetViewerColorsOnly() {
+  const api = await initAPI();
+
+  try {
+    await api.viewer.setObjectState(undefined, {
+      color: "reset"
+    });
+    log("Đã reset lớp màu cũ.");
+  } catch (err) {
+    log("Reset màu fallback: " + (err?.message || String(err)));
+  }
+}
+
+async function applyColorGroups(api, modelId, groups) {
+  for (const color in groups) {
+    const ids = uniqueIds(groups[color]);
+    if (!ids.length) continue;
+
+    const batches = chunkArray(ids, 1000);
+
+    for (let i = 0; i < batches.length; i++) {
+      const batchIds = batches[i];
+
+      await api.viewer.setObjectState(
+        {
+          modelObjectIds: [
+            {
+              modelId: modelId,
+              objectRuntimeIds: batchIds
+            }
+          ]
+        },
+        {
+          color: color
+        }
+      );
+
+      log(`Đã tô ${batchIds.length} object -> ${color} (batch ${i + 1}/${batches.length})`);
+    }
+  }
+}
+
 async function colorByPaintCode() {
   const api = await initAPI();
 
@@ -109,6 +170,11 @@ async function colorByPaintCode() {
   log("Bắt đầu đổi GUID -> runtimeId...");
 
   const guids = rows.map(r => r.guid);
+
+  if (!guids.length) {
+    log("Không có GUID hợp lệ trong Excel.");
+    return;
+  }
 
   log("Test GUID đầu tiên: " + guids[0]);
 
@@ -135,9 +201,9 @@ async function colorByPaintCode() {
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    const runtimeId = runtimeIds[i];
+    const ids = normalizeRuntimeIds(runtimeIds[i]);
 
-    if (runtimeId === undefined || runtimeId === null) {
+    if (!ids.length) {
       unmatched++;
       continue;
     }
@@ -145,33 +211,15 @@ async function colorByPaintCode() {
     const color = colorMap[row.paintCode] || "#2196F3";
 
     if (!groups[color]) groups[color] = [];
-    groups[color].push(runtimeId);
-    matched++;
+    groups[color].push(...ids);
+    matched += ids.length;
   }
 
   log("Match: " + matched);
   log("Không match: " + unmatched);
 
-  for (const color in groups) {
-    const ids = groups[color];
-    if (!ids.length) continue;
-
-    await api.viewer.setObjectState(
-      {
-        modelObjectIds: [
-          {
-            modelId: modelId,
-            objectRuntimeIds: ids
-          }
-        ]
-      },
-      {
-        color: color
-      }
-    );
-
-    log(`Đã tô ${ids.length} object -> ${color}`);
-  }
+  await resetViewerColorsOnly();
+  await applyColorGroups(api, modelId, groups);
 
   log("Hoàn tất tô màu.");
 }
@@ -238,5 +286,15 @@ document.getElementById("saveViewBtn").addEventListener("click", async () => {
   } catch (err) {
     console.error(err);
     log("Lỗi lưu view: " + (err?.message || JSON.stringify(err) || String(err)));
+  }
+});
+
+document.getElementById("resetBtn").addEventListener("click", async () => {
+  try {
+    clearLog();
+    await resetViewerColorsOnly();
+  } catch (err) {
+    console.error(err);
+    log("Lỗi reset màu: " + (err?.message || JSON.stringify(err) || String(err)));
   }
 });
