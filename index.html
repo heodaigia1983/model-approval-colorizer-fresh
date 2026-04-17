@@ -12,10 +12,10 @@
       --brand-blue: #0063a3;
       --brand-blue-dark: #004f82;
       --brand-green: #4caf50;
-      --brand-gray: #f3f5f7;
       --brand-border: #d7dde3;
       --brand-text: #1f2933;
       --brand-subtext: #5b6770;
+      --brand-bg: #f8fafb;
     }
 
     body {
@@ -100,13 +100,15 @@
     }
 
     #readBtn,
-    #saveViewBtn {
+    #saveViewBtn,
+    #resetBtn {
       background: var(--brand-blue);
       color: #fff;
     }
 
     #readBtn:hover,
-    #saveViewBtn:hover {
+    #saveViewBtn:hover,
+    #resetBtn:hover {
       background: var(--brand-blue-dark);
     }
 
@@ -121,9 +123,9 @@
 
     #log {
       white-space: pre-wrap;
-      background: #f8fafb;
+      background: var(--brand-bg);
       padding: 8px;
-      height: 280px;
+      height: 300px;
       overflow: auto;
       border: 1px solid var(--brand-border);
       border-radius: 8px;
@@ -163,6 +165,7 @@
     <div class="btn-row">
       <button id="readBtn">Đọc Excel</button>
       <button id="saveViewBtn">Save View</button>
+      <button id="resetBtn">Reset màu</button>
     </div>
 
     <div class="note">
@@ -176,6 +179,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=10"></script>
+  <script src="app.js?v=20"></script>
 </body>
 </html>
